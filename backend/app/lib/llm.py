@@ -1,10 +1,7 @@
 """Thin async wrapper over the chat model. Model name is config-driven, so
 swapping providers/models is a one-line change (see README tradeoffs)."""
-from openai import AsyncOpenAI
-
 from app.config import settings
-
-_client = AsyncOpenAI(api_key=settings.openai_api_key)
+from app.lib.llm_client import client
 
 SYSTEM_PROMPT = (
     "You answer strictly from the provided context. "
@@ -17,7 +14,7 @@ SYSTEM_PROMPT = (
 async def generate_answer(question: str, context_blocks: list[str]) -> str:
     context = "\n\n".join(context_blocks)
     user = f"Context:\n{context}\n\nQuestion: {question}"
-    resp = await _client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=settings.llm_model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -25,4 +22,4 @@ async def generate_answer(question: str, context_blocks: list[str]) -> str:
         ],
         temperature=0.1,
     )
-    return resp.choices[0].message.content or ""
+    return response.choices[0].message.content or ""

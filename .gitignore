@@ -4,9 +4,12 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# Local state — never commit the database or real keys
+# Local state — never commit the database or real keys.
+# .env* catches backups like .env.bak that a bare `.env` rule would miss.
 *.db
 .env
+.env.*
+!.env.example
 
 # Node / frontend
 node_modules/
