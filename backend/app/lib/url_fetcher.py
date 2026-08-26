@@ -39,6 +39,18 @@ async def fetch_and_extract(url: str) -> tuple[str, str]:
             "Page was fetched but no readable article content could be extracted"
         )
 
+    # "Fetched successfully" is not the same as "worth indexing". An aggregator
+    # or paywalled page yields a headline and a teaser, which would otherwise be
+    # stored as a perfectly healthy 'ready' item that answers nothing — a
+    # silent failure dressed as a success. Better to say why.
+    if len(content) < settings.min_extracted_chars:
+        raise UrlFetchError(
+            f"Only {len(content)} characters of readable text were extracted "
+            f"(minimum {settings.min_extracted_chars}). This looks like an index, "
+            "search, or paywalled page rather than an article. Try linking "
+            "directly to the article itself."
+        )
+
     return title, content[: settings.max_content_chars]
 
 

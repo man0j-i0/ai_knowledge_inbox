@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # URL ingestion
     url_fetch_timeout_seconds: float = 10.0
     max_content_chars: int = 200_000
+    # Below this, a page is treated as having no article on it. Index pages and
+    # link aggregators extract to a headline plus a one-line teaser — a few
+    # hundred characters that index fine and answer nothing. Notes are exempt:
+    # a two-word note is legitimate, a two-word "article" is not.
+    min_extracted_chars: int = 500
 
 
 settings = Settings()
