@@ -62,12 +62,13 @@ async def _process_item(item_id: str) -> None:
                 "chunk_index": i,
                 "content": text,
                 "embedding": repo.embedding_to_blob(vec),
-                "token_count": None,
+                "token_count": chunker.count_tokens(text),
             }
             for i, (text, vec) in enumerate(zip(chunk_texts, vectors))
         ]
-        repo.insert_chunks(rows)
-        repo.set_item_status(item_id, ItemStatus.ready)
+        # One transaction: clears any chunks from an interrupted earlier run,
+        # inserts this run's, and flips the status. Safe to replay.
+        repo.replace_chunks_and_mark_ready(item_id, rows)
         log.info("ingest.ready", item_id=item_id, chunks=len(rows))
 
     except Exception as exc:  # noqa: BLE001 — any failure must be recorded, not swallowed

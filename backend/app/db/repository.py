@@ -48,13 +48,28 @@ def set_item_status(item_id: str, status: ItemStatus, error: str | None = None) 
                      (status.value, error, item_id))
 
 
-def insert_chunks(chunks: list[dict]) -> None:
+def replace_chunks_and_mark_ready(item_id: str, chunks: list[dict]) -> None:
+    """Swap in an item's chunks and mark it ready — atomically.
+
+    Ingestion is replayable: recover_orphaned_items() re-enqueues anything left
+    'processing' by a crash. Inserting without clearing first would mean a crash
+    between the insert and the status flip leaves chunks behind, and the replay
+    appends a *second* copy — so the same passage could be retrieved and cited
+    twice. Deleting first makes processing idempotent, and doing all three
+    statements in one transaction means a crash can never leave an item marked
+    ready against a half-written set of chunks.
+    """
     with get_connection() as conn:
+        conn.execute("DELETE FROM chunks WHERE item_id = ?", (item_id,))
         conn.executemany(
             "INSERT INTO chunks (id, item_id, chunk_index, content, embedding, token_count)"
             " VALUES (?, ?, ?, ?, ?, ?)",
             [(c["id"], c["item_id"], c["chunk_index"], c["content"],
               c["embedding"], c.get("token_count")) for c in chunks],
+        )
+        conn.execute(
+            "UPDATE items SET status = ?, error = NULL WHERE id = ?",
+            (ItemStatus.ready.value, item_id),
         )
 
 
