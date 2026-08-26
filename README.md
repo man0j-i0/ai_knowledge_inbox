@@ -19,7 +19,7 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env               # add your real OPENAI_API_KEY
+cp .env.example .env               # add your real LLM_API_KEY
 uvicorn app.main:app --reload      # http://localhost:8000
 ```
 
@@ -30,6 +30,14 @@ npm run dev                        # http://localhost:5173
 ```
 
 Interactive API docs: http://localhost:8000/docs
+
+**Model provider.** The client is the OpenAI SDK pointed at whatever
+`LLM_BASE_URL` names, so the provider is configuration, not a code path.
+`.env.example` ships blocks for Google Gemini (free tier, no card) and OpenAI;
+Groq or a local Ollama work the same way. Defaults are Gemini —
+`gemini-3.6-flash` and `gemini-embedding-001` at 1536 dimensions — chosen by
+benchmarking rather than by picking the newest name. See
+[`backend/README.md`](backend/README.md#model-provider) for why.
 
 The backend whitelists `http://localhost:5173` for CORS. If you change the Vite
 port, change `allow_origins` in `backend/app/main.py` to match.
@@ -124,7 +132,10 @@ version:
 - **Vector store** is float32 BLOBs in SQLite with brute-force NumPy cosine:
   exact, reproducible, and fast at this scale. An ANN index is the upgrade path.
 - **A relevance threshold** means an unanswerable question gets "I couldn't
-  find that" rather than an improvised answer.
+  find that" rather than an improvised answer — and it never reaches the model,
+  so those queries return in 0.4s instead of 5s. The value (0.60) was measured
+  from logged cosine scores, not guessed: this embedding model floors near 0.40
+  on unrelated text and reaches 0.70+ on real matches.
 - **No LangChain** — the pipeline is a handful of readable functions.
 
 ## Deliberately left out
