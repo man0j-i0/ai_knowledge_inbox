@@ -18,7 +18,10 @@ import trafilatura
 
 from app.config import settings
 
-# Identify honestly; many sites 403 an unknown or absent User-Agent.
+# Identify honestly. I measured a full Chrome UA string against the same set of
+# sites and it made no difference — identical status codes everywhere, including
+# Wikipedia, which blocks programmatic access by policy rather than by
+# User-Agent sniffing. So there is nothing to buy by impersonating a browser.
 USER_AGENT = "Mozilla/5.0 (compatible; AIKnowledgeInbox/1.0)"
 
 
