@@ -106,7 +106,7 @@ frontend/
 ## Tests
 
 ```bash
-cd backend && pytest        # 31 tests, no network and no API key needed
+cd backend && pytest        # 40 tests, no network and no API key needed
 cd frontend && npm run build   # typecheck + production build
 ```
 

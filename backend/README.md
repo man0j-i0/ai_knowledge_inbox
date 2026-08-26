@@ -49,12 +49,16 @@ raise outright. There is no versioning or migration — a real gap, noted below.
 pytest
 ```
 
-31 tests, no network calls and no API key required. The model calls are stubbed
+40 tests, no network calls and no API key required. The model calls are stubbed
 in `tests/test_api_flow.py`, so the suite still exercises the real queue,
 worker, status lifecycle, SQLite layer and routes:
 
 - `test_chunker.py` — boundary behaviour, overlap, size ceiling, degenerate input
 - `test_similarity.py` — cosine correctness, ranking order, no input mutation
+- `test_repository.py` — that re-processing an item is idempotent, that only
+  `ready` items are searchable, and that a successful retry clears a stale error
+- `test_url_fetcher.py` — the extraction guard: a real article passes, an
+  aggregator teaser is rejected with an actionable message
 - `test_api_flow.py` — ingest → worker → ready → query end to end, plus the
   failure paths: a URL that 404s, an empty inbox, a question nothing matches,
   and every invalid payload shape
@@ -177,20 +181,22 @@ the API and the background worker. Notable events: `ingest.start`,
 
 Honest list, in the order I would fix them:
 
-1. **Re-processing duplicates chunks.** A crash between `insert_chunks` and
-   `set_item_status(ready)` leaves the item `processing`; the recovery sweep
-   then re-runs it and inserts its chunks again. Fix: delete an item's chunks
-   before processing, or do both writes in one transaction.
-2. **No retries.** A transient 429 or 500 permanently fails an item.
-3. **The query path reloads every vector**, as described above.
-4. **Single process only** — `uvicorn --workers > 1` would duplicate the
+1. **No retries.** A transient 429 or 500 permanently fails an item. Worth
+   noting these need different handling despite sharing a status code: a
+   rate-limit `429` should be retried with backoff, a quota `429` never can
+   succeed and should fail immediately.
+2. **The query path reloads every vector**, as described above.
+3. **Single process only** — `uvicorn --workers > 1` would duplicate the
    recovery sweep and split the queue.
-5. **No embedding-model versioning**, so changing models silently invalidates
-   what is stored.
-6. **SSRF** — `/ingest` will fetch any URL, including internal addresses.
-7. **No delete, re-index, or pagination endpoints.**
-8. **No evaluation harness**, so retrieval quality is unmeasured beyond the
+4. **No embedding-model versioning**, so changing models silently invalidates
+   what is stored — and a dimension change makes retrieval raise outright.
+5. **SSRF** — `/ingest` will fetch any URL, including internal addresses.
+6. **No delete, re-index, or pagination endpoints.** Re-index is now cheap,
+   since processing is idempotent and the raw content is kept.
+7. **No evaluation harness**, so retrieval quality is unmeasured beyond the
    threshold calibration above.
+8. **The threshold is calibrated on a small corpus.** The 0.48/0.71 gap may
+   narrow with more content, so it deserves re-measuring.
 
 ## What I deliberately left out
 
