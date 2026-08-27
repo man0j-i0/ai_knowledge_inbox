@@ -1,144 +1,157 @@
 # AI Knowledge Inbox
 
-Save notes and links, then ask questions across everything you saved and get an
-answer with citations back to the source.
+Save notes and links, then ask questions across everything you've saved. Answers
+come back with citations to the source text.
 
-A FastAPI backend handles ingestion and retrieval-augmented answering; a React
-frontend adds items, shows what has been indexed, and asks questions.
+FastAPI on the backend, React on the frontend, a small RAG pipeline in between.
 
-> **TODO before submitting:** the tradeoffs sections here and in
-> [`backend/README.md`](backend/README.md) are the graded part — rewrite them
-> in your own voice, add a screenshot or short GIF below, then delete this note.
+## Running it
 
-## Quick start
+Two terminals, and you'll need an API key.
 
-Two terminals. Backend first.
+Backend:
 
 ```bash
 cd backend
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env               # add your real LLM_API_KEY
-uvicorn app.main:app --reload      # http://localhost:8000
+cp .env.example .env               # put a real LLM_API_KEY in it
+uvicorn app.main:app --reload
 ```
+
+Frontend:
 
 ```bash
 cd frontend
 npm install
-npm run dev                        # http://localhost:5173
+npm run dev
 ```
 
-Interactive API docs: http://localhost:8000/docs
+Then open http://localhost:5173. Use `localhost`, not `127.0.0.1`, because the
+backend only allows that exact origin for CORS.
 
-**Model provider.** The client is the OpenAI SDK pointed at whatever
-`LLM_BASE_URL` names, so the provider is configuration, not a code path.
-`.env.example` ships blocks for Google Gemini (free tier, no card) and OpenAI;
-Groq or a local Ollama work the same way. Defaults are Gemini —
-`gemini-3.6-flash` and `gemini-embedding-001` at 1536 dimensions — chosen by
-benchmarking rather than by picking the newest name. See
-[`backend/README.md`](backend/README.md#model-provider) for why.
+API docs are at http://localhost:8000/docs.
 
-The backend whitelists `http://localhost:5173` for CORS. If you change the Vite
-port, change `allow_origins` in `backend/app/main.py` to match.
+### About the API key
+
+It talks to anything that speaks the OpenAI API format. `.env.example` has
+ready-made blocks for Google Gemini and OpenAI, and Groq or a local Ollama would
+work the same way. It ships pointed at Gemini because the free tier doesn't need
+a card. `backend/README.md` explains which models and why.
 
 ## How it works
 
 ```
-                    ┌──────────────────────────────────────────┐
-  React (hooks)     │  FastAPI                                 │
-   add note/URL ──► │   POST /ingest ──► create item, enqueue  │──► 202
-   items + status ◄─│   GET  /items  ──► list + status         │
-   ask question ──► │   POST /query  ──► RAG pipeline          │
-   answer+sources ◄─│                                          │
-                    └───────┬──────────────────────┬───────────┘
-                            │                      │
-         ┌──────────────────▼─────┐   ┌────────────▼─────────────┐
-         │ ingestion worker       │   │ query pipeline           │
-         │ (asyncio.Queue)        │   │ embed question           │
-         │  fetch  (httpx)        │   │ cosine over all chunks   │
-         │  extract (trafilatura) │   │ threshold + top-k        │
-         │  chunk                 │   │ numbered context → LLM   │
-         │  embed  (AsyncOpenAI)  │   │ answer + cited sources   │
-         │  → ready | failed      │   └────────────┬─────────────┘
-         └──────────────────┬─────┘                │
-                     ┌──────▼────────────────────────────┐
-                     │ SQLite: items, chunks + embeddings │
-                     └────────────────────────────────────┘
+                    +------------------------------------------+
+  React (hooks)     |  FastAPI                                 |
+   add note/URL --> |   POST /ingest --> create item, enqueue  |--> 202
+   items + status <-|   GET  /items  --> list + status         |
+   ask question --> |   POST /query  --> RAG pipeline          |
+   answer+sources <-|                                          |
+                    +-------+--------------------------+-------+
+                            |                          |
+         +------------------v-----+   +----------------v---------+
+         | ingestion worker       |   | query pipeline           |
+         | (asyncio.Queue)        |   | embed question           |
+         |  fetch  (httpx)        |   | cosine over all chunks   |
+         |  extract (trafilatura) |   | threshold + top-k        |
+         |  chunk                 |   | numbered context -> LLM  |
+         |  embed                 |   | answer + cited sources   |
+         |  -> ready | failed     |   +----------------+---------+
+         +------------------+-----+                    |
+                     +------v-----------------------------+
+                     | SQLite: items, chunks + embeddings  |
+                     +-------------------------------------+
 ```
 
-Ingestion is **asynchronous**. `POST /ingest` records the item and returns
-`202 Accepted` immediately; a background worker does the slow work and moves
-the item `processing → ready`, or `failed` with the reason attached. The
-frontend polls `/items` while anything is still processing and stops once the
-inbox is idle.
+The important bit is that ingestion happens in the background. `POST /ingest`
+saves the item and returns `202` straight away, then a worker does the slow part
+(fetching, extracting, chunking, embedding) and marks the item `ready`, or
+`failed` with the reason. Fetching a URL can take ten seconds, so doing that
+inside the request would make the app feel broken.
+
+The frontend polls `/items` while anything is still processing and stops once
+the list is idle.
 
 ## API
 
-| Method | Path      | Purpose                                                    |
-|--------|-----------|------------------------------------------------------------|
-| POST   | `/ingest` | Add a note or URL. **202** with the new item id and status. |
-| GET    | `/items`  | List saved items with `status`, `chunk_count`, and `error`. |
-| POST   | `/query`  | Ask a question. Returns an answer plus cited sources.       |
-| GET    | `/health` | Liveness check.                                             |
+| Method | Path      | What it does                                             |
+|--------|-----------|----------------------------------------------------------|
+| POST   | `/ingest` | Save a note or URL. Returns `202` with the new item's id. |
+| GET    | `/items`  | List saved items with status, chunk count, and error.    |
+| POST   | `/query`  | Ask a question. Returns an answer and its sources.       |
+| GET    | `/health` | Liveness check.                                          |
 
-Invalid payloads return **422** naming the offending field. Every response
-carries an `X-Request-ID` that also appears in the structured logs, so a single
-request can be followed across the API and the background worker.
+Bad input gets a `422` naming the field that's wrong. Every response has an
+`X-Request-ID` header, and the same id shows up in the logs, so you can trace one
+request through the API and the background worker.
 
 ## Layout
 
 ```
 backend/
   app/
-    api/        HTTP only — parse, delegate, return
-    services/   orchestration: ingestion pipeline, RAG pipeline
-    lib/        single-purpose helpers: chunker, similarity, fetcher, clients
-    db/         schema + every line of SQL
-  tests/        unit tests and a stubbed end-to-end flow test
+    api/        HTTP only, no logic
+    services/   ingestion pipeline, RAG pipeline
+    lib/        chunker, similarity, fetcher, model clients
+    db/         schema and all the SQL
+  tests/        40 tests
 frontend/
   src/
-    api/        the only module that touches the network
-    hooks/      useItems (with polling), useIngest, useAsk
+    api/        the only file that touches the network
+    hooks/      useItems (polls), useIngest, useAsk
     components/ form, item list, ask panel, answer + sources
 ```
 
 ## Tests
 
 ```bash
-cd backend && pytest        # 40 tests, no network and no API key needed
-cd frontend && npm run build   # typecheck + production build
+cd backend && pytest          # 40 tests, no network, no API key needed
+cd frontend && npm run build  # typecheck + build
 ```
 
-The backend suite stubs the two OpenAI calls with deterministic vectors and
-drives the real queue, worker, database and routes end to end — including a URL
-that 404s, an empty inbox, a question nothing matches, and every invalid
-payload shape.
+The model calls are stubbed with fake vectors, so the tests still run the real
+queue, worker, database and routes. They cover the failure paths too: a URL that
+404s, a page with no article on it, an empty inbox, a question that matches
+nothing, and every shape of bad request.
 
-## Design decisions
+## Decisions worth explaining
 
-Written up in full in [`backend/README.md`](backend/README.md). The short
-version:
+The longer version is in [`backend/README.md`](backend/README.md). Short version:
 
-- **Async ingestion via an in-process `asyncio.Queue`** rather than Celery or
-  Redis, because this is single-user by design. The cost is durability, so
-  items left `processing` by a crash are re-enqueued at startup.
-- **Nothing blocks the event loop** — async OpenAI and httpx clients, with
-  CPU-bound content extraction pushed to a worker thread.
-- **Three item states, not two.** `failed` carries the reason to the UI, so a
-  broken URL explains itself instead of spinning forever.
-- **Chunking** is recursive and boundary-aware, ~600 tokens with ~80 overlap,
-  descending paragraph → sentence → hard cut only as far as needed.
-- **Vector store** is float32 BLOBs in SQLite with brute-force NumPy cosine:
-  exact, reproducible, and fast at this scale. An ANN index is the upgrade path.
-- **A relevance threshold** means an unanswerable question gets "I couldn't
-  find that" rather than an improvised answer — and it never reaches the model,
-  so those queries return in 0.4s instead of 5s. The value (0.60) was measured
-  from logged cosine scores, not guessed: this embedding model floors near 0.40
-  on unrelated text and reaches 0.70+ on real matches.
-- **No LangChain** — the pipeline is a handful of readable functions.
+**Background ingestion using an in-memory queue.** Not Celery or Redis, because
+this is a single-user app and that would be a lot of infrastructure for no
+benefit. The catch is durability: if the process dies, anything in the queue is
+gone. So on startup it looks for items stuck in `processing` and re-queues them.
 
-## Deliberately left out
+**Nothing blocks the event loop.** The model and HTTP clients are async.
+Content extraction isn't, so it runs in a thread. Otherwise a single slow ingest
+would freeze the whole API, which defeats the point of doing it in the
+background.
 
-Auth, multi-user, streaming, reranking and hybrid search, retries, containers
-and orchestration. Scope matches the assignment's stated 6–12 hour intent.
+**Three states, not two.** `failed` carries the reason with it. Without that, a
+dead link just sits on `processing` forever and you have no idea why.
+
+**Chunking** splits on paragraphs first, then sentences, and only cuts mid-text
+if it has to. Around 600 tokens with 80 tokens of overlap. Small chunks lose the
+context that makes them findable, big ones bury the useful sentence in noise.
+
+**Vectors live in SQLite as float32 blobs** and I compare them with NumPy. At
+this size that's exact, fast, and easy to debug. The first thing that breaks at
+scale is that every query reloads every vector, which is fine for thousands of
+chunks and not fine for hundreds of thousands.
+
+**There's a relevance floor.** If nothing scores above it, you get "I couldn't
+find that" and the model never gets called, so those queries come back in under
+half a second. The number came from logging real scores, not from guessing. See
+the backend README, it's a good story.
+
+**No LangChain.** Chunk, embed, retrieve, prompt. That's four functions I can
+read and explain.
+
+## Not included
+
+No auth, no multi-user, no streaming, no reranking, no Docker. The brief said to
+avoid that stuff and I'd rather explain the tradeoffs than build infrastructure
+nobody asked for.

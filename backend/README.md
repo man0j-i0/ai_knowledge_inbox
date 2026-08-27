@@ -1,205 +1,228 @@
-# AI Knowledge Inbox — Backend
+# AI Knowledge Inbox - Backend
 
-FastAPI service that ingests notes and URLs, indexes them for semantic search,
-and answers questions over the saved content with cited sources.
+FastAPI service. Takes notes and URLs, indexes them, and answers questions about
+them with citations.
 
-> **TODO before submitting:** rewrite the "Design decisions & tradeoffs"
-> section below in your own voice — it is the graded part, and it should read
-> like you made these calls, because you did. Then delete this note.
-
-## Run locally
+## Running it
 
 ```bash
 cd backend
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env               # then put a real LLM_API_KEY in .env
+cp .env.example .env               # put a real LLM_API_KEY in it
 uvicorn app.main:app --reload
 ```
 
-API docs: http://localhost:8000/docs · Health: http://localhost:8000/health
+Docs at http://localhost:8000/docs, health check at /health.
 
-## Model provider
+## Which model provider
 
-The client is the OpenAI SDK pointed at whatever `LLM_BASE_URL` names, so the
-provider is configuration rather than a code path. `.env.example` ships blocks
-for Google Gemini (free tier, no card) and OpenAI; Groq or a local Ollama work
-the same way.
+The client is the OpenAI SDK pointed at whatever `LLM_BASE_URL` says, so
+switching providers is config, not code. `.env.example` has blocks for Gemini
+and OpenAI. Groq or a local Ollama would work too.
 
-The defaults are Gemini, and they were arrived at by measurement, not by
-copying a docs snippet:
+It defaults to Gemini because the free tier doesn't need a card. I picked the
+specific models by testing them, not by reading the docs:
 
 | Setting | Value | Why |
 |---|---|---|
-| `LLM_MODEL` | `gemini-3.6-flash` | 2.5s per answer. `gemini-2.5-flash` is retired for new keys; `gemini-3.7-flash` and the `gemini-flash-latest` alias both exceeded 45s because they reason by default. |
-| `EMBEDDING_MODEL` | `gemini-embedding-001` | Free tier, and it honours an explicit output dimension. |
-| `EMBEDDING_DIMENSIONS` | `1536` | The model defaults to 3072. Truncating halves storage and the per-query dot product. Matryoshka-trained, so the shorter vector is still meaningful, and cosine normalises anyway so no re-normalisation is needed. |
+| `LLM_MODEL` | `gemini-3.6-flash` | 2.5s per answer. `gemini-2.5-flash` is retired for new keys. `gemini-3.7-flash` and `gemini-flash-latest` both took over 45 seconds because they reason before answering. |
+| `EMBEDDING_MODEL` | `gemini-embedding-001` | Free, and it lets you ask for a specific vector size. |
+| `EMBEDDING_DIMENSIONS` | `1536` | It returns 3072 by default. Halving it halves storage and halves the work per query. It's a Matryoshka model so the shorter vector still means something. |
 
-**Pin an explicit version.** Aliases like `gemini-flash-latest` can silently
-move to a reasoning model and turn a 2.5s answer into a 45s one.
+Two things worth knowing.
 
-**Changing embedding model invalidates stored vectors.** Different models
-produce incomparable embeddings, and a dimension change makes `np.vstack`
-raise outright. There is no versioning or migration — a real gap, noted below.
+**Pin the version.** `gemini-flash-latest` sounds sensible and is a trap. It
+currently points at a reasoning model, so using it would silently turn a 2.5
+second answer into a 45 second one with no code change on my side.
 
-## Run tests
+**Changing the embedding model invalidates everything already stored.** Vectors
+from different models aren't comparable, and if the dimensions change too then
+retrieval just crashes. There's no migration for this. It's on the gaps list.
+
+## Tests
 
 ```bash
 pytest
 ```
 
-40 tests, no network calls and no API key required. The model calls are stubbed
-in `tests/test_api_flow.py`, so the suite still exercises the real queue,
-worker, status lifecycle, SQLite layer and routes:
+40 tests. No network, no API key needed. The model calls are stubbed with fake
+vectors, so the tests still exercise the real queue, worker, status transitions,
+database and routes.
 
-- `test_chunker.py` — boundary behaviour, overlap, size ceiling, degenerate input
-- `test_similarity.py` — cosine correctness, ranking order, no input mutation
-- `test_repository.py` — that re-processing an item is idempotent, that only
-  `ready` items are searchable, and that a successful retry clears a stale error
-- `test_url_fetcher.py` — the extraction guard: a real article passes, an
-  aggregator teaser is rejected with an actionable message
-- `test_api_flow.py` — ingest → worker → ready → query end to end, plus the
-  failure paths: a URL that 404s, an empty inbox, a question nothing matches,
-  and every invalid payload shape
+- `test_chunker.py` - boundaries, overlap, size limits, empty input
+- `test_similarity.py` - cosine maths, ranking order, doesn't mutate its input
+- `test_repository.py` - re-processing an item doesn't duplicate its chunks,
+  only `ready` items are searchable, a successful retry clears the old error
+- `test_url_fetcher.py` - a real article gets through, a teaser page doesn't
+- `test_api_flow.py` - ingest through to query, plus the failure paths
 
 ## Endpoints
 
-| Method | Path      | Purpose                                              |
-|--------|-----------|------------------------------------------------------|
-| POST   | `/ingest` | Add a note or URL. Returns **202** + item id/status.  |
-| GET    | `/items`  | List saved items with `status` and `chunk_count`.     |
-| POST   | `/query`  | Ask a question. Returns an answer + cited sources.    |
+| Method | Path      | What it does                                     |
+|--------|-----------|--------------------------------------------------|
+| POST   | `/ingest` | Save a note or URL. `202` plus the item id.      |
+| GET    | `/items`  | Everything saved, with status and chunk count.   |
+| POST   | `/query`  | Ask a question, get an answer and sources.       |
 
-`/ingest` answers **202 Accepted**, not 201: the item exists but is not yet
-searchable. Clients poll `/items` for `processing → ready | failed`.
-Invalid payloads return **422** with the offending field, via Pydantic.
+`/ingest` returns `202` rather than `201` because the item exists but isn't
+searchable yet. Clients poll `/items` to watch it go `processing` to `ready` or
+`failed`. Bad input gets a `422` naming the field.
 
-## Architecture
+## How it fits together
 
 ```
-React ──REST──> FastAPI ──> SQLite (items, chunks+embeddings)
-                   │
-                   ├── POST /ingest ──> create item (status=processing)
-                   │                    └─ enqueue(item_id) ──> 202
-                   │
-                   └── asyncio.Queue ──> ingestion worker
-                          fetch (httpx) ─ extract (trafilatura, to_thread)
-                          ─ chunk ─ embed ─ store ─ status=ready
-                                            └─ on error ─ status=failed
-query: embed question ─ cosine top-k ─ threshold ─ prompt ─ LLM ─ answer+sources
+React --REST--> FastAPI --> SQLite (items, chunks + embeddings)
+                   |
+                   +-- POST /ingest --> create item (processing)
+                   |                    enqueue(item_id) --> 202
+                   |
+                   +-- asyncio.Queue --> worker
+                          fetch (httpx), extract (trafilatura, in a thread),
+                          chunk, embed, store, mark ready
+                          on any error: mark failed with the reason
+
+query: embed question, cosine over chunks, apply threshold,
+       number the context, call the model, return answer + sources
 ```
 
-Layering is strict: `api/` handles HTTP only, `services/` orchestrates,
-`lib/` holds pure/single-purpose helpers, `db/repository.py` owns every line of
-SQL. No module reaches past its neighbour.
+The layers are strict. `api/` only speaks HTTP. `services/` orchestrates.
+`lib/` holds small single-purpose helpers. `db/repository.py` owns every line of
+SQL. Nothing reaches past its neighbour.
 
-## Design decisions & tradeoffs
+## Decisions and tradeoffs
 
-- **Asynchronous ingestion via an in-process `asyncio.Queue`.** `/ingest`
-  returns `202` immediately; a single background worker fetches, extracts,
-  chunks, embeds, and flips the item `processing → ready` (or `failed`). Chosen
-  over Redis/Celery because the assessment is single-user and deliberately
-  lightweight. **Tradeoff:** no durability — a crash orphans in-flight items,
-  so `recover_orphaned_items()` re-enqueues anything left `processing` at
-  startup. In production this becomes a durable queue (SQS/Redis) with
-  independently scalable workers and a retry/dead-letter policy.
-- **One worker, not a pool.** Ordering stays obvious and the provider rate limit
-  is never burst. Throughput is the price, and it is the right price here.
-- **Nothing blocks the event loop.** Embeddings and generation use the async
-  OpenAI client, fetching uses async `httpx`, and CPU-bound extraction runs in
-  `asyncio.to_thread`. A slow ingest never freezes the API — which is the
-  whole point of doing this asynchronously in the first place.
-- **Three states, not two.** `failed` carries the reason ("returned HTTP 404",
-  "no readable article content") all the way to the UI. Without it a broken
-  URL just spins on `processing` forever and the user has no idea why.
-- **Chunking:** recursive and boundary-aware, ~600 tokens with ~80 overlap,
-  descending paragraph → sentence → hard token cut only as far as needed.
-  Small chunks lose the context that makes them findable; large ones average a
-  specific fact into a vague topic vector and waste prompt budget. Overlap
-  keeps a fact that straddles a boundary intact in at least one chunk. A short
-  note stays one chunk.
-- **Vector store:** embeddings as float32 BLOBs in SQLite, brute-force NumPy
-  cosine at query time. Sub-millisecond at this scale, exactly reproducible,
-  and there is no index to mistune. **Breaks at scale:** the query path reloads
-  and deserialises every vector on every request, which is linear in corpus
-  size and is the first wall — around 10k chunks. The fix order is: cache the
-  matrix in memory, then `sqlite-vec`, then pgvector.
-- **Relevance threshold, measured rather than guessed.** If no chunk clears
-  `SIMILARITY_THRESHOLD`, the API returns "I couldn't find relevant information
-  in your saved content" and **never calls the LLM** — cheaper and safer than
-  asking the model to decline. The value came from reading the `query.scores`
-  log on real questions:
+**Background ingestion with an in-memory queue.** `/ingest` returns immediately
+and a single worker does the work. I didn't reach for Celery or Redis because
+this is a single-user app and that's a lot of moving parts to buy nothing. The
+real cost is durability: kill the process and the queue is gone. So
+`recover_orphaned_items()` runs at startup and re-queues anything stuck in
+`processing`. In production you'd want a real queue with retries and a
+dead-letter path.
 
-  | Question against a note about "Project Falcon" | Score |
-  |---|---|
-  | "Who is the technical lead on Project Falcon?" | 0.749 |
-  | "Where will the Falcon pilot run?" | 0.708 |
-  | "What is retrieval-augmented generation?" | 0.481 |
-  | "What is the recipe for sourdough bread?" | 0.408 |
-  | "How do I renew a Canadian passport?" | 0.401 |
+**One worker, not a pool.** Ordering stays simple and I never hammer the
+provider's rate limit. The price is throughput, and one slow URL holds up
+everything behind it. Acceptable for one user.
 
-  `gemini-embedding-001` floors near **0.40** even for completely unrelated
-  text and reaches **0.70+** on genuine matches, so **0.60** sits in the gap.
-  The initial 0.35 — a reasonable default for OpenAI's embeddings — would have
-  passed every one of those irrelevant questions through to the model. The
-  threshold is a property of the embedding model, not a universal constant, and
-  swapping models means re-measuring it.
-- **Citations:** retrieved chunks are numbered `[n]` in the prompt and mapped
-  back to source items in the response, so every claim is traceable.
-- **A connection per unit of work.** `get_connection()` is a context manager
-  that commits on success, rolls back on failure, and always closes.
-  `with sqlite3.connect(...)` alone commits but never closes, which leaks a
-  handle per request; a fresh connection also sidesteps sqlite3's same-thread
-  restriction, since the worker touches the DB from a different context than
-  the request handlers.
-- **No LangChain.** Chunk / embed / retrieve / prompt is a few readable
-  functions. Every step is explainable and debuggable, and there is no
-  framework abstraction between me and a bad retrieval result.
+**Nothing blocks the event loop.** The model calls and the HTTP fetch are async.
+`trafilatura` isn't, and parsing a big page takes real CPU time, so it runs via
+`asyncio.to_thread`. Get this wrong and you've written `async def` everywhere
+while still freezing the server on every ingest.
 
-## URL ingestion, in practice
+**Three states, not two.** `failed` carries the reason all the way to the UI:
+"returned HTTP 404", "only 283 characters of readable text were extracted".
+Without it a broken link sits on `processing` forever and the user is left
+guessing.
 
-`trafilatura` handles real pages well — the FastAPI docs homepage extracts to
-14k characters of clean article text with the title intact.
+**Chunking.** Split on paragraphs, fall back to sentences, and only cut
+mid-sentence when there's no choice. Target 600 tokens with 80 of overlap.
+Chunks that are too small lose the context that makes them findable. Too big and
+the one useful sentence gets averaged into a vague topic vector that also eats
+prompt budget. Overlap means a fact sitting on a boundary survives whole in at
+least one chunk. A short note stays as one chunk.
 
-Some sites refuse programmatic access outright. Wikipedia returns **403**, and
-I confirmed by measurement that a full Chrome User-Agent string makes no
-difference: identical status codes across five sites. So the fetcher identifies
-itself honestly rather than impersonating a browser for a benefit that does not
-exist. A failed fetch is surfaced as `failed` with the status code, which is
-the correct behaviour — but a production version would want a fallback such as
-a headless-browser renderer or a reader API for sites that block plain fetches.
+**Vectors as float32 blobs in SQLite, compared with NumPy.** Exact, no index to
+tune, and I can print the scores when something looks wrong. What breaks first
+isn't the maths, it's that every query reloads and deserialises every vector.
+Fine at a few thousand chunks, painful past ten thousand. The fix order would be
+to cache the matrix in memory, then move to `sqlite-vec`, then pgvector.
 
-## Debuggability
+**The relevance threshold, which is measured rather than guessed.** If nothing
+clears `SIMILARITY_THRESHOLD` the API says so and never calls the model at all,
+which is cheaper and safer than asking it to decline politely. Here's what the
+scores actually looked like against a single note about a project called Falcon:
 
-Structured JSON logs via `structlog`, with a per-request id bound into the
-context (also returned as `X-Request-ID`) so a request can be followed across
-the API and the background worker. Notable events: `ingest.start`,
-`ingest.ready`, `ingest.failed`, `ingest.recover`, `query.scores`.
+| Question | Score |
+|---|---|
+| "Who is the technical lead on Project Falcon?" | 0.749 |
+| "Where will the Falcon pilot run?" | 0.708 |
+| "What is retrieval-augmented generation?" | 0.481 |
+| "What is the recipe for sourdough bread?" | 0.408 |
+| "How do I renew a Canadian passport?" | 0.401 |
+
+So this model sits around 0.40 even for text with nothing to do with the
+question, and lands at 0.70+ on a genuine match. 0.60 goes in the gap.
+
+I had it at 0.35 originally, which is a sane default for OpenAI's embeddings and
+completely wrong for this one. Everything got through the filter. The answers
+still looked correct, because the system prompt caught what the threshold let
+past, which is exactly why I didn't spot it until I logged the scores. A
+threshold belongs to the embedding model, not to the app.
+
+**Citations.** Retrieved chunks get numbered in the prompt and the model is told
+to cite by number. The response ships the same numbering, so the UI can line the
+`[1]` in the answer up with the passage it came from.
+
+**A database connection per unit of work.** `get_connection()` commits, rolls
+back on error, and always closes. `with sqlite3.connect(...)` on its own commits
+but never closes, which leaks a handle every request. Opening a fresh connection
+each time also sidesteps sqlite3's same-thread rule, which matters because the
+worker isn't on the request thread.
+
+**No LangChain.** The whole pipeline is chunk, embed, retrieve, prompt. Four
+readable functions beat a framework whose source I'd have to go read the first
+time retrieval returns something stupid.
+
+## URL ingestion in practice
+
+`trafilatura` does a good job on real pages. The FastAPI docs homepage comes out
+as about 14k characters of clean text with the title intact.
+
+Two things I ran into.
+
+**Some sites just say no.** Wikipedia returns 403 to anything programmatic. I
+tried a full Chrome User-Agent against five sites and got identical status codes
+either way, so impersonating a browser buys nothing and the fetcher identifies
+itself honestly instead. Sites like that need a headless browser or a reader
+API, which felt out of scope here.
+
+**A successful fetch isn't the same as a usable article.** Feeding it a link
+aggregator worked perfectly and produced a completely useless item: 283
+characters of headline and teaser, stored as a healthy `ready` item that could
+never answer anything. That's a silent failure dressed up as a success, which is
+worse than a loud one. Anything under `MIN_EXTRACTED_CHARS` now fails with a
+message telling you to link to the article rather than the index. Notes are
+exempt, because a two-word note is fine and a two-word article isn't.
+
+## Debugging it
+
+Logs are JSON via `structlog`. A request id is bound once in middleware and
+appears on every line for that request, including work the background worker
+does later. It also comes back as the `X-Request-ID` header.
+
+Useful events: `ingest.start`, `ingest.ready`, `ingest.failed`, `ingest.recover`,
+`query.scores`.
+
+`query.scores` is the one that earns its keep. When retrieval feels wrong it
+tells you straight away whether the threshold is too high, nothing relevant was
+stored, or the content never got indexed at all. Three different problems that
+look identical from the outside.
 
 ## Known gaps
 
-Honest list, in the order I would fix them:
+Roughly in the order I'd fix them.
 
-1. **No retries.** A transient 429 or 500 permanently fails an item. Worth
-   noting these need different handling despite sharing a status code: a
-   rate-limit `429` should be retried with backoff, a quota `429` never can
-   succeed and should fail immediately.
-2. **The query path reloads every vector**, as described above.
-3. **Single process only** — `uvicorn --workers > 1` would duplicate the
-   recovery sweep and split the queue.
-4. **No embedding-model versioning**, so changing models silently invalidates
-   what is stored — and a dimension change makes retrieval raise outright.
-5. **SSRF** — `/ingest` will fetch any URL, including internal addresses.
-6. **No delete, re-index, or pagination endpoints.** Re-index is now cheap,
-   since processing is idempotent and the raw content is kept.
-7. **No evaluation harness**, so retrieval quality is unmeasured beyond the
+1. **No retries.** One transient 429 or 500 kills an item permanently. The two
+   kinds of 429 need opposite handling, too: rate limiting should back off and
+   retry, quota exhaustion can never succeed and should fail immediately. Same
+   status code, so you have to read the error body.
+2. **Every query reloads every vector**, as above.
+3. **Single process only.** `uvicorn --workers 2` would give each process its
+   own queue and run the recovery sweep twice.
+4. **No embedding model versioning**, so swapping models quietly invalidates
+   what's stored.
+5. **SSRF.** `/ingest` will fetch any URL you give it, including internal
+   addresses.
+6. **No delete, re-index or pagination endpoints.** Re-index would be easy now,
+   since processing is idempotent and the original text is kept.
+7. **No evaluation harness.** Retrieval quality is unmeasured beyond the
    threshold calibration above.
-8. **The threshold is calibrated on a small corpus.** The 0.48/0.71 gap may
-   narrow with more content, so it deserves re-measuring.
+8. **That threshold came from a small corpus.** The gap between 0.48 and 0.71
+   might narrow with more content in there.
 
-## What I deliberately left out
+## Left out on purpose
 
-Auth, multi-user, streaming responses, reranking/hybrid search, retries,
-Redis/Kafka/k8s. Scope matches the ~6–12h intent of the assessment; each of
-these is a paragraph above rather than a directory of code.
+Auth, multi-user, streaming, reranking, hybrid search, Docker. The brief asked
+for 6 to 12 hours and said not to build infrastructure theatre, so these are
+paragraphs above rather than directories of code.
