@@ -5,6 +5,7 @@ the real queue, worker, status lifecycle, SQLite layer, chunker, retrieval and
 routes without a network call or an API key. The unit tests cover the pure
 functions; this is the test that catches a broken pipeline.
 """
+import asyncio
 import re
 import time
 
@@ -177,3 +178,50 @@ def test_invalid_ingest_payloads_are_rejected(client, payload):
 )
 def test_invalid_query_payloads_are_rejected(client, payload):
     assert client.post("/query", json=payload).status_code == 422
+
+
+def test_item_can_be_deleted_and_stops_being_searchable(client):
+    ingested = client.post(
+        "/ingest",
+        json={"type": "note", "content": "Ferrets are small domesticated mustelids."},
+    )
+    item_id = ingested.json()["id"]
+    _wait_for_status(client, item_id, "ready")
+
+    # It answers before deletion...
+    assert client.post("/query", json={"question": "What are ferrets?"}).json()["sources"]
+
+    assert client.delete(f"/items/{item_id}").status_code == 204
+
+    # ...and afterwards it is gone from both the list and retrieval.
+    assert client.get("/items").json() == []
+    body = client.post("/query", json={"question": "What are ferrets?"}).json()
+    assert body["sources"] == []
+    assert body["answer"] == NO_ANSWER
+
+
+def test_deleting_an_unknown_item_is_a_404(client):
+    response = client.delete("/items/00000000-0000-0000-0000-000000000000")
+
+    assert response.status_code == 404
+    assert "detail" in response.json()
+
+
+def test_deleting_a_processing_item_is_allowed(client, monkeypatch):
+    """The worker re-reads the row before doing anything, so a delete that
+    lands mid-flight simply wins the race rather than corrupting state."""
+    async def slow_fetch(url: str):
+        await asyncio.sleep(0.5)
+        return "Slow Page", "Some article text that will never be indexed."
+
+    monkeypatch.setattr(url_fetcher, "fetch_and_extract", slow_fetch)
+
+    ingested = client.post(
+        "/ingest", json={"type": "url", "url": "https://example.com/slow"}
+    )
+    item_id = ingested.json()["id"]
+
+    assert client.delete(f"/items/{item_id}").status_code == 204
+    time.sleep(1.0)  # let the worker finish against a row that no longer exists
+
+    assert all(item["id"] != item_id for item in client.get("/items").json())

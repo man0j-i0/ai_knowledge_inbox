@@ -10,7 +10,7 @@ import { useItems } from "./hooks/useItems";
  * short of what would justify a store or a context.
  */
 export default function App() {
-  const { items, isLoading, error, refresh, isPolling } = useItems();
+  const { items, isLoading, error, refresh, remove, isPolling } = useItems();
   const readyItemCount = items.filter((item) => item.status === "ready").length;
 
   return (
@@ -28,6 +28,7 @@ export default function App() {
             isLoading={isLoading}
             error={error}
             isPolling={isPolling}
+            onRemove={(itemId) => void remove(itemId)}
           />
         </div>
 

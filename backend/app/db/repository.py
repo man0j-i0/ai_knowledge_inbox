@@ -73,6 +73,19 @@ def replace_chunks_and_mark_ready(item_id: str, chunks: list[dict]) -> None:
         )
 
 
+def delete_item(item_id: str) -> bool:
+    """Remove an item. Returns False if there was nothing to remove, so the
+    route can answer 404 rather than pretending it deleted something.
+
+    Chunks go with it via ON DELETE CASCADE — which only fires because
+    get_connection() sets PRAGMA foreign_keys = ON. SQLite ignores foreign keys
+    by default, so without that pragma this would silently orphan every chunk.
+    """
+    with get_connection() as conn:
+        cursor = conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+        return cursor.rowcount > 0
+
+
 def list_items() -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(

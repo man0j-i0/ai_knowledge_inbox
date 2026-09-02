@@ -47,7 +47,7 @@ retrieval just crashes. There's no migration for this. It's on the gaps list.
 pytest
 ```
 
-40 tests. No network, no API key needed. The model calls are stubbed with fake
+46 tests. No network, no API key needed. The model calls are stubbed with fake
 vectors, so the tests still exercise the real queue, worker, status transitions,
 database and routes.
 
@@ -56,6 +56,8 @@ database and routes.
 - `test_repository.py` - re-processing an item doesn't duplicate its chunks,
   only `ready` items are searchable, a successful retry clears the old error
 - `test_url_fetcher.py` - a real article gets through, a teaser page doesn't
+- delete is covered in both: cascade behaviour in the repository suite, and
+  `204` / `404` / deleting mid-ingest in the flow suite
 - `test_api_flow.py` - ingest through to query, plus the failure paths
 
 ## Endpoints
@@ -65,6 +67,7 @@ database and routes.
 | POST   | `/ingest` | Save a note or URL. `202` plus the item id.      |
 | GET    | `/items`  | Everything saved, with status and chunk count.   |
 | POST   | `/query`  | Ask a question, get an answer and sources.       |
+| DELETE | `/items/{item_id}` | Remove an item. `204`, or `404` if unknown. |
 
 `/ingest` returns `202` rather than `201` because the item exists but isn't
 searchable yet. Clients poll `/items` to watch it go `processing` to `ready` or
@@ -150,6 +153,14 @@ still looked correct, because the system prompt caught what the threshold let
 past, which is exactly why I didn't spot it until I logged the scores. A
 threshold belongs to the embedding model, not to the app.
 
+**Deleting is a hard delete, not a soft one.** The row goes, and the chunks go
+with it through `ON DELETE CASCADE`. That cascade only fires because
+`get_connection()` sets `PRAGMA foreign_keys = ON` - SQLite ignores foreign keys
+by default, which would have quietly left orphaned chunks behind and kept a
+deleted item answering questions. Deleting something mid-ingest is allowed too:
+the worker re-reads the row before it does anything and stops when it finds
+nothing there, so the delete just wins the race.
+
 **Citations.** Retrieved chunks get numbered in the prompt and the model is told
 to cite by number. The response ships the same numbering, so the UI can line the
 `[1]` in the answer up with the passage it came from.
@@ -214,8 +225,8 @@ Roughly in the order I'd fix them.
    what's stored.
 5. **SSRF.** `/ingest` will fetch any URL you give it, including internal
    addresses.
-6. **No delete, re-index or pagination endpoints.** Re-index would be easy now,
-   since processing is idempotent and the original text is kept.
+6. **No re-index or pagination endpoints.** Re-index would be easy now, since
+   processing is idempotent and the original text is kept.
 7. **No evaluation harness.** Retrieval quality is unmeasured beyond the
    threshold calibration above.
 8. **That threshold came from a small corpus.** The gap between 0.48 and 0.71

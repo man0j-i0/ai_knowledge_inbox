@@ -74,6 +74,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(await readErrorMessage(response), response.status);
   }
 
+  // A 204 carries no body, and response.json() throws on an empty one.
+  if (response.status === 204) return undefined as T;
+
   return (await response.json()) as T;
 }
 
@@ -92,4 +95,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  /** Removes the item and everything indexed from it. Answers 204. */
+  deleteItem: (itemId: string) =>
+    request<void>(`/items/${encodeURIComponent(itemId)}`, { method: "DELETE" }),
 };

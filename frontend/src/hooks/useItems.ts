@@ -34,6 +34,21 @@ export function useItems() {
     void refresh();
   }, [refresh]);
 
+  const remove = useCallback(async (itemId: string) => {
+    // Drop it from the list first so the row disappears on click rather than
+    // after a round trip. On failure the refresh below puts it back, so the
+    // list still ends up matching the server either way.
+    setItems((current) => current.filter((item) => item.id !== itemId));
+    try {
+      await api.deleteItem(itemId);
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to remove item");
+    } finally {
+      await refresh();
+    }
+  }, [refresh]);
+
   const hasProcessing = items.some((item) => item.status === "processing");
 
   useEffect(() => {
@@ -43,5 +58,5 @@ export function useItems() {
     return () => clearInterval(timer);
   }, [hasProcessing, refresh]);
 
-  return { items, isLoading, error, refresh, isPolling: hasProcessing };
+  return { items, isLoading, error, refresh, remove, isPolling: hasProcessing };
 }

@@ -81,6 +81,7 @@ the list is idle.
 | POST   | `/ingest` | Save a note or URL. Returns `202` with the new item's id. |
 | GET    | `/items`  | List saved items with status, chunk count, and error.    |
 | POST   | `/query`  | Ask a question. Returns an answer and its sources.       |
+| DELETE | `/items/{id}` | Remove an item and everything indexed from it.       |
 | GET    | `/health` | Liveness check.                                          |
 
 Bad input gets a `422` naming the field that's wrong. Every response has an
@@ -96,7 +97,7 @@ backend/
     services/   ingestion pipeline, RAG pipeline
     lib/        chunker, similarity, fetcher, model clients
     db/         schema and all the SQL
-  tests/        40 tests
+  tests/        46 tests
 frontend/
   src/
     api/        the only file that touches the network
@@ -107,7 +108,7 @@ frontend/
 ## Tests
 
 ```bash
-cd backend && pytest          # 40 tests, no network, no API key needed
+cd backend && pytest          # 46 tests, no network, no API key needed
 cd frontend && npm run build  # typecheck + build
 ```
 

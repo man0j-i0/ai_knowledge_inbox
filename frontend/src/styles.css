@@ -213,6 +213,8 @@ body {
 }
 
 .item__title {
+  flex: 1;
+  min-width: 0;
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -368,4 +370,36 @@ body {
 
 a {
   color: var(--accent);
+}
+
+/* --- remove control ---------------------------------------------------- */
+
+.remove {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.remove:hover {
+  color: var(--error-text);
+  border-color: var(--error-text);
+}
+
+.remove--yes {
+  background: var(--error-bg);
+  border-color: var(--error-bg);
+  color: var(--error-text);
+}
+
+.remove-confirm {
+  display: inline-flex;
+  gap: 5px;
+  white-space: nowrap;
 }

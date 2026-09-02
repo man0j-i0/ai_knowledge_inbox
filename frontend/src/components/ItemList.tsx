@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { Item } from "../types";
 import { ErrorBanner } from "./ErrorBanner";
 import { StatusBadge } from "./StatusBadge";
@@ -7,7 +9,45 @@ function formatTimestamp(iso: string): string {
   return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString();
 }
 
-function ItemRow({ item }: { item: Item }) {
+/**
+ * Two clicks to delete. There is no undo and the embeddings have to be
+ * regenerated to get an item back, so a misclick is expensive enough to be
+ * worth one extra click — and cheaper than a modal.
+ */
+function RemoveButton({ onConfirm }: { onConfirm: () => void }) {
+  const [isArmed, setIsArmed] = useState(false);
+
+  if (!isArmed) {
+    return (
+      <button
+        type="button"
+        className="remove"
+        aria-label="Remove item"
+        onClick={() => setIsArmed(true)}
+      >
+        ×
+      </button>
+    );
+  }
+
+  return (
+    <span className="remove-confirm">
+      <button type="button" className="remove remove--yes" onClick={onConfirm}>
+        Remove
+      </button>
+      <button type="button" className="remove" onClick={() => setIsArmed(false)}>
+        Cancel
+      </button>
+    </span>
+  );
+}
+
+interface ItemRowProps {
+  item: Item;
+  onRemove: (itemId: string) => void;
+}
+
+function ItemRow({ item, onRemove }: ItemRowProps) {
   return (
     <li className="item">
       <div className="item__head">
@@ -15,6 +55,7 @@ function ItemRow({ item }: { item: Item }) {
           {item.title}
         </span>
         <StatusBadge status={item.status} />
+        <RemoveButton onConfirm={() => onRemove(item.id)} />
       </div>
 
       <div className="item__meta">
@@ -45,9 +86,10 @@ interface ItemListProps {
   isLoading: boolean;
   error: string | null;
   isPolling: boolean;
+  onRemove: (itemId: string) => void;
 }
 
-export function ItemList({ items, isLoading, error, isPolling }: ItemListProps) {
+export function ItemList({ items, isLoading, error, isPolling, onRemove }: ItemListProps) {
   return (
     <section className="card">
       <div className="card__head">
@@ -64,7 +106,7 @@ export function ItemList({ items, isLoading, error, isPolling }: ItemListProps) 
       ) : (
         <ul className="item-list">
           {items.map((item) => (
-            <ItemRow key={item.id} item={item} />
+            <ItemRow key={item.id} item={item} onRemove={onRemove} />
           ))}
         </ul>
       )}

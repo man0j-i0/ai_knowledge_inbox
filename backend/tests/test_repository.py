@@ -95,3 +95,33 @@ def test_orphan_sweep_finds_only_processing_items(db):
 
     assert stuck_id in orphans
     assert ready_id not in orphans
+
+
+def test_deleting_an_item_removes_its_chunks(db):
+    item_id = _make_item(db)
+    repo.replace_chunks_and_mark_ready(item_id, _chunks(item_id, 4))
+
+    assert repo.delete_item(item_id) is True
+
+    assert repo.get_item(item_id) is None
+    # ON DELETE CASCADE only fires because get_connection sets
+    # PRAGMA foreign_keys = ON; SQLite ignores foreign keys otherwise.
+    orphans = [c for c in repo.get_ready_chunks() if c["item_id"] == item_id]
+    assert orphans == [], "chunks must not outlive the item they came from"
+
+
+def test_deleting_an_unknown_item_reports_that_nothing_happened(db):
+    assert repo.delete_item("does-not-exist") is False
+
+
+def test_deleting_one_item_leaves_the_others_alone(db):
+    keep_id = _make_item(db)
+    drop_id = _make_item(db)
+    repo.replace_chunks_and_mark_ready(keep_id, _chunks(keep_id, 2))
+    repo.replace_chunks_and_mark_ready(drop_id, _chunks(drop_id, 3))
+
+    repo.delete_item(drop_id)
+
+    remaining = [c for c in repo.get_ready_chunks()]
+    assert {c["item_id"] for c in remaining} == {keep_id}
+    assert len(remaining) == 2
